@@ -12,7 +12,7 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-APP_VERSION = "2026-04-02-patch4"
+APP_VERSION = "2026-04-02-patch2"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
@@ -140,24 +140,6 @@ def send_document_file(chat_id: int, file_path: str, caption=None):
 
 def build_result_caption():
     return '<a href="https://t.me/zalivreel">Nice_ig - автоматизация инстаграма</a>'
-
-
-def build_user_friendly_error_message(error_text: str) -> str:
-    s = (error_text or "").lower()
-
-    restricted_markers = [
-        "this content may be inappropriate",
-        "unavailable for certain audiences",
-        "private",
-        "login required",
-        "requested content is not available",
-        "not available",
-    ]
-
-    if any(marker in s for marker in restricted_markers):
-        return "Аккаунт приватный или контент 18+ - не получится скачать"
-
-    return f"Ошибка: {error_text}"
 
 
 def build_ydl_opts(temp_dir: str, use_cookies: bool):
@@ -306,7 +288,6 @@ def webhook():
         if not media_url:
             return jsonify({"ok": True, "skip": "no instagram url"})
 
-        send_message(chat_id, "Начинаю скачивание")
         file_path = download_instagram_media(media_url)
         result_caption = build_result_caption()
         try:
@@ -331,8 +312,7 @@ def webhook():
             chat_id = chat.get("id")
             message_id = message.get("message_id")
             if chat_id:
-                user_error_text = build_user_friendly_error_message(str(e))
-                send_message(chat_id, user_error_text)
+                send_message(chat_id, f"Ошибка: {e}", reply_to_message_id=message_id)
         except Exception:
             log("[webhook] failed to send error message to telegram")
             log(traceback.format_exc())
