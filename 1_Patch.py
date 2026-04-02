@@ -1,49 +1,60 @@
-import glob
-import os
-import re
-import shutil
-import tempfile
-import traceback
-from urllib.parse import urlparse, urlunparse
+from pathlib import Path
 
-import requests
-import yt_dlp
-from flask import Flask, request, jsonify
-
-app = Flask(__name__)
-
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIE_FILE = os.path.join(SCRIPT_DIR, "cookies.txt")
+APP_FILE = Path("app.py")
 
 
-def log(msg):
-    print(msg, flush=True)
+def replace_once(text: str, old: str, new: str) -> str:
+    if old not in text:
+        raise RuntimeError(f"Фрагмент не найден для замены:\n{old[:300]}")
+    return text.replace(old, new, 1)
 
 
-def normalize_url(url: str) -> str:
-    url = url.strip()
-    if not url:
-        return ""
+def replace_block(text: str, start_marker: str, end_marker: str, new_block: str) -> str:
+    start = text.find(start_marker)
+    if start == -1:
+        raise RuntimeError(f"Не найден start_marker:\n{start_marker}")
 
-    parsed = urlparse(url)
+    end = text.find(end_marker, start)
+    if end == -1:
+        raise RuntimeError(f"Не найден end_marker:\n{end_marker}")
 
-    if not parsed.scheme:
-        url = "https://" + url
+    return text[:start] + new_block + text[end:]
+
+
+text = APP_FILE.read_text(encoding="utf-8")
+
+
+# 1) reel -> reel/p/tv
+text = replace_once(
+    text,
+    '''def is_public_instagram_reel(url: str) -> bool:
+    try:
         parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
 
-    cleaned = parsed._replace(query="", fragment="")
-    url = urlunparse(cleaned)
+        if "instagram.com" not in host:
+            return False
 
-    if not url.endswith("/"):
-        url += "/"
+        return "/reel/" in path
+    except Exception:
+        return False
 
+
+def find_instagram_reel_url(text: str):
+    if not text:
+        return None
+
+    m = re.search(r"https?://(?:www\\.)?instagram\\.com/reel/[A-Za-z0-9_-]+/?[^\\s]*", text, re.I)
+    if not m:
+        return None
+
+    url = normalize_url(m.group(0))
+    if not is_public_instagram_reel(url):
+        return None
     return url
-
-
-def is_supported_instagram_url(url: str) -> bool:
+''',
+    '''def is_supported_instagram_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
         host = parsed.netloc.lower()
@@ -66,7 +77,7 @@ def find_instagram_media_url(text: str):
         return None
 
     m = re.search(
-        r"https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+/?[^\s]*",
+        r"https?://(?:www\\.)?instagram\\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+/?[^\\s]*",
         text,
         re.I,
     )
@@ -77,39 +88,26 @@ def find_instagram_media_url(text: str):
     if not is_supported_instagram_url(url):
         return None
     return url
+'''
+)
 
 
-def telegram(method: str, payload=None, files=None):
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing")
-
-    resp = requests.post(
-        f"{BASE_URL}/{method}",
-        data=payload,
-        files=files,
-        timeout=120,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram {method} failed: {data}")
-
-    return data
-
-
-def send_message(chat_id: int, text: str, reply_to_message_id=None):
+# 2) sendDocument
+text = replace_once(
+    text,
+    '''def send_video_file(chat_id: int, file_path: str, reply_to_message_id=None):
     payload = {
         "chat_id": str(chat_id),
-        "text": text,
+        "supports_streaming": "true",
     }
     if reply_to_message_id:
         payload["reply_to_message_id"] = str(reply_to_message_id)
 
-    return telegram("sendMessage", payload=payload)
-
-
-def send_video_file(chat_id: int, file_path: str, reply_to_message_id=None):
+    with open(file_path, "rb") as f:
+        files = {"video": (os.path.basename(file_path), f, "video/mp4")}
+        return telegram("sendVideo", payload=payload, files=files)
+''',
+    '''def send_video_file(chat_id: int, file_path: str, reply_to_message_id=None):
     payload = {
         "chat_id": str(chat_id),
         "supports_streaming": "true",
@@ -132,9 +130,12 @@ def send_document_file(chat_id: int, file_path: str, reply_to_message_id=None):
     with open(file_path, "rb") as f:
         files = {"document": (os.path.basename(file_path), f, "application/octet-stream")}
         return telegram("sendDocument", payload=payload, files=files)
+'''
+)
 
 
-def build_ydl_opts(temp_dir: str, use_cookies: bool):
+# 3) download_reel -> новый блок без regex
+new_download_block = '''def build_ydl_opts(temp_dir: str, use_cookies: bool):
     output_template = os.path.join(temp_dir, "%(uploader)s_%(title).80B_%(id)s.%(ext)s")
 
     ydl_opts = {
@@ -233,46 +234,36 @@ def download_instagram_media(url: str) -> str:
     raise RuntimeError("Скачать media не удалось")
 
 
+'''
 
-@app.get("/")
-
-
-@app.get("/")
-def health():
-    return jsonify({"ok": True, "service": "ig-reel-bot"})
-
-
-@app.get("/debug")
-def debug():
-    return jsonify({
-        "ok": True,
-        "bot_token_set": bool(BOT_TOKEN),
-        "cookie_file_path": COOKIE_FILE,
-        "cookie_exists": os.path.exists(COOKIE_FILE),
-        "cwd": os.getcwd(),
-        "script_dir": SCRIPT_DIR,
-        "files_in_script_dir": sorted(os.listdir(SCRIPT_DIR)),
-    })
+text = replace_block(
+    text,
+    'def download_reel(url: str) -> str:\n',
+    '\n\n@app.get("/")\n',
+    new_download_block + '\n@app.get("/")\n'
+)
 
 
-@app.post("/webhook")
-def webhook():
-    try:
-        update = request.get_json(force=True, silent=True) or {}
-        log(f"[webhook] update={update}")
+# 4) webhook
+text = replace_once(
+    text,
+    '''        reel_url = find_instagram_reel_url(text)
+        log(f"[webhook] reel_url={reel_url}")
 
-        message = update.get("message") or {}
-        text = (message.get("text") or "").strip()
-        chat = message.get("chat") or {}
-        chat_id = chat.get("id")
-        message_id = message.get("message_id")
+        if not reel_url:
+            send_message(chat_id, "Кинь ссылку на Instagram reel.", reply_to_message_id=message_id)
+            return jsonify({"ok": True, "skip": "no reel url"})
 
-        log(f"[webhook] chat_id={chat_id} message_id={message_id} text={text!r}")
+        send_message(chat_id, "Скачиваю...", reply_to_message_id=message_id)
 
-        if not chat_id:
-            return jsonify({"ok": True, "skip": "no chat_id"})
-
-        media_url = find_instagram_media_url(text)
+        file_path = download_reel(reel_url)
+        try:
+            send_video_file(chat_id, file_path, reply_to_message_id=message_id)
+        finally:
+            temp_dir = os.path.dirname(file_path)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+''',
+    '''        media_url = find_instagram_media_url(text)
         log(f"[webhook] media_url={media_url}")
 
         if not media_url:
@@ -291,26 +282,9 @@ def webhook():
         finally:
             temp_dir = os.path.dirname(file_path)
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-        return jsonify({"ok": True})
-    except Exception as e:
-        log("[webhook] exception:")
-        log(traceback.format_exc())
-
-        try:
-            update = request.get_json(force=True, silent=True) or {}
-            message = update.get("message") or {}
-            chat = message.get("chat") or {}
-            chat_id = chat.get("id")
-            message_id = message.get("message_id")
-            if chat_id:
-                send_message(chat_id, f"Ошибка: {e}", reply_to_message_id=message_id)
-        except Exception:
-            log("[webhook] failed to send error message to telegram")
-            log(traceback.format_exc())
-
-        return jsonify({"ok": False, "error": str(e)}), 500
+'''
+)
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+APP_FILE.write_text(text, encoding="utf-8")
+print("OK: app.py patched")
