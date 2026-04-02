@@ -12,13 +12,16 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-APP_VERSION = "2026-04-02-patch4"
+APP_VERSION = "2026-04-02-patch5"
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(SCRIPT_DIR, "cookies.txt")
+
+PROCESSED_UPDATE_IDS = set()
+PROCESSED_UPDATE_IDS_LIMIT = 1000
 
 
 def log(msg):
@@ -160,6 +163,20 @@ def build_user_friendly_error_message(error_text: str) -> str:
     return f"Ошибка: {error_text}"
 
 
+def is_duplicate_update(update_id) -> bool:
+    if update_id is None:
+        return False
+    return update_id in PROCESSED_UPDATE_IDS
+
+
+def mark_update_processed(update_id):
+    if update_id is None:
+        return
+    PROCESSED_UPDATE_IDS.add(update_id)
+    if len(PROCESSED_UPDATE_IDS) > PROCESSED_UPDATE_IDS_LIMIT:
+        PROCESSED_UPDATE_IDS.clear()
+
+
 def build_ydl_opts(temp_dir: str, use_cookies: bool):
     output_template = os.path.join(temp_dir, "%(uploader)s_%(title).80B_%(id)s.%(ext)s")
 
@@ -289,6 +306,11 @@ def webhook():
         update = request.get_json(force=True, silent=True) or {}
         log(f"[webhook] update={update}")
 
+        update_id = update.get("update_id")
+        if is_duplicate_update(update_id):
+            log(f"[webhook] duplicate update_id={update_id} - skip")
+            return jsonify({"ok": True, "skip": "duplicate update"})
+
         message = update.get("message") or {}
         text = (message.get("text") or message.get("caption") or "").strip()
         chat = message.get("chat") or {}
@@ -319,6 +341,7 @@ def webhook():
             temp_dir = os.path.dirname(file_path)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+        mark_update_processed(update_id)
         return jsonify({"ok": True})
     except Exception as e:
         log("[webhook] exception:")
@@ -326,18 +349,19 @@ def webhook():
 
         try:
             update = request.get_json(force=True, silent=True) or {}
+            update_id = update.get("update_id")
             message = update.get("message") or {}
             chat = message.get("chat") or {}
             chat_id = chat.get("id")
-            message_id = message.get("message_id")
             if chat_id:
                 user_error_text = build_user_friendly_error_message(str(e))
                 send_message(chat_id, user_error_text)
+            mark_update_processed(update_id)
         except Exception:
             log("[webhook] failed to send error message to telegram")
             log(traceback.format_exc())
 
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": True, "error": str(e)}), 200
 
 
 if __name__ == "__main__":

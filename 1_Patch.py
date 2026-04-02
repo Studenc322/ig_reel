@@ -19,19 +19,23 @@ def main():
     # 1) версия
     text = replace_once(
         text,
-        'APP_VERSION = "2026-04-02-patch2"',
         'APP_VERSION = "2026-04-02-patch4"',
+        'APP_VERSION = "2026-04-02-patch5"',
         "APP_VERSION",
     )
 
-    # 2) вставляем helper для нормального текста ошибки
-    marker = '''def build_result_caption():
-    return '<a href="https://t.me/zalivreel">Nice_ig - автоматизация инстаграма</a>'
+    # 2) добавляем кеш обработанных update_id сразу после COOKIE_FILE
+    old = '''COOKIE_FILE = os.path.join(SCRIPT_DIR, "cookies.txt")
 '''
-    if "def build_user_friendly_error_message(error_text: str) -> str:" not in text:
-        addition = '''
+    new = '''COOKIE_FILE = os.path.join(SCRIPT_DIR, "cookies.txt")
 
-def build_user_friendly_error_message(error_text: str) -> str:
+PROCESSED_UPDATE_IDS = set()
+PROCESSED_UPDATE_IDS_LIMIT = 1000
+'''
+    text = replace_once(text, old, new, "processed update ids storage")
+
+    # 3) вставляем helper-функции после build_user_friendly_error_message
+    marker = '''def build_user_friendly_error_message(error_text: str) -> str:
     s = (error_text or "").lower()
 
     restricted_markers = [
@@ -48,40 +52,109 @@ def build_user_friendly_error_message(error_text: str) -> str:
 
     return f"Ошибка: {error_text}"
 '''
+    addition = '''
+
+def is_duplicate_update(update_id) -> bool:
+    if update_id is None:
+        return False
+    return update_id in PROCESSED_UPDATE_IDS
+
+
+def mark_update_processed(update_id):
+    if update_id is None:
+        return
+    PROCESSED_UPDATE_IDS.add(update_id)
+    if len(PROCESSED_UPDATE_IDS) > PROCESSED_UPDATE_IDS_LIMIT:
+        PROCESSED_UPDATE_IDS.clear()
+'''
+    if "def is_duplicate_update(update_id) -> bool:" not in text:
         if marker not in text:
-            raise RuntimeError("Не найдено место для вставки build_user_friendly_error_message")
+            raise RuntimeError("Не найдено место для вставки duplicate helpers")
         text = text.replace(marker, marker + addition, 1)
-        print("[OK] build_user_friendly_error_message")
+        print("[OK] duplicate helpers")
     else:
-        print("[SKIP] build_user_friendly_error_message уже есть")
+        print("[SKIP] duplicate helpers уже есть")
 
-    # 3) добавляем отбивку перед скачиванием
-    old = '''        if not media_url:
-            return jsonify({"ok": True, "skip": "no instagram url"})
+    # 4) в webhook добавляем update_id и проверку на дубль
+    old = '''        update = request.get_json(force=True, silent=True) or {}
+        log(f"[webhook] update={update}")
 
-        file_path = download_instagram_media(media_url)
+        message = update.get("message") or {}
 '''
-    new = '''        if not media_url:
-            return jsonify({"ok": True, "skip": "no instagram url"})
+    new = '''        update = request.get_json(force=True, silent=True) or {}
+        log(f"[webhook] update={update}")
 
-        send_message(chat_id, "Начинаю скачивание")
-        file_path = download_instagram_media(media_url)
-'''
-    text = replace_once(text, old, new, "start download message")
+        update_id = update.get("update_id")
+        if is_duplicate_update(update_id):
+            log(f"[webhook] duplicate update_id={update_id} - skip")
+            return jsonify({"ok": True, "skip": "duplicate update"})
 
-    # 4) меняем сырой текст ошибки на человеческий
-    old = '''            if chat_id:
-                send_message(chat_id, f"Ошибка: {e}", reply_to_message_id=message_id)
+        message = update.get("message") or {}
 '''
-    new = '''            if chat_id:
+    text = replace_once(text, old, new, "webhook duplicate check")
+
+    # 5) после успешной отправки результата помечаем апдейт обработанным
+    old = '''        finally:
+            temp_dir = os.path.dirname(file_path)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return jsonify({"ok": True})
+'''
+    new = '''        finally:
+            temp_dir = os.path.dirname(file_path)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        mark_update_processed(update_id)
+        return jsonify({"ok": True})
+'''
+    text = replace_once(text, old, new, "mark processed on success")
+
+    # 6) в except тоже помечаем апдейт и главное возвращаем 200, а не 500
+    old = '''    except Exception as e:
+        log("[webhook] exception:")
+        log(traceback.format_exc())
+
+        try:
+            update = request.get_json(force=True, silent=True) or {}
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            message_id = message.get("message_id")
+            if chat_id:
                 user_error_text = build_user_friendly_error_message(str(e))
                 send_message(chat_id, user_error_text)
+        except Exception:
+            log("[webhook] failed to send error message to telegram")
+            log(traceback.format_exc())
+
+        return jsonify({"ok": False, "error": str(e)}), 500
 '''
-    text = replace_once(text, old, new, "friendly error message")
+    new = '''    except Exception as e:
+        log("[webhook] exception:")
+        log(traceback.format_exc())
+
+        try:
+            update = request.get_json(force=True, silent=True) or {}
+            update_id = update.get("update_id")
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            chat_id = chat.get("id")
+            if chat_id:
+                user_error_text = build_user_friendly_error_message(str(e))
+                send_message(chat_id, user_error_text)
+            mark_update_processed(update_id)
+        except Exception:
+            log("[webhook] failed to send error message to telegram")
+            log(traceback.format_exc())
+
+        return jsonify({"ok": True, "error": str(e)}), 200
+'''
+    text = replace_once(text, old, new, "except returns 200")
 
     APP_FILE.write_text(text, encoding="utf-8")
     print("\\n[DONE] app.py пропатчен")
-
+    print("[INFO] Теперь один и тот же update не будет спамиться по кругу")
+    print("[INFO] После ошибки webhook будет отвечать Telegram'у 200, не 500")
 
 if __name__ == "__main__":
     try:
