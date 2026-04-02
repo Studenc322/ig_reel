@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import tempfile
+import traceback
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -16,6 +17,10 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(SCRIPT_DIR, "cookies.txt")
+
+
+def log(msg):
+    print(msg, flush=True)
 
 
 def normalize_url(url: str) -> str:
@@ -52,7 +57,7 @@ def is_public_instagram_reel(url: str) -> bool:
         return False
 
 
-def find_instagram_reel_url(text: str) -> str | None:
+def find_instagram_reel_url(text: str):
     if not text:
         return None
 
@@ -85,7 +90,7 @@ def telegram(method: str, payload=None, files=None):
     return data
 
 
-def send_message(chat_id: int, text: str, reply_to_message_id: int | None = None):
+def send_message(chat_id: int, text: str, reply_to_message_id=None):
     payload = {
         "chat_id": str(chat_id),
         "text": text,
@@ -96,7 +101,7 @@ def send_message(chat_id: int, text: str, reply_to_message_id: int | None = None
     return telegram("sendMessage", payload=payload)
 
 
-def send_video_file(chat_id: int, file_path: str, reply_to_message_id: int | None = None):
+def send_video_file(chat_id: int, file_path: str, reply_to_message_id=None):
     payload = {
         "chat_id": str(chat_id),
         "supports_streaming": "true",
@@ -110,6 +115,10 @@ def send_video_file(chat_id: int, file_path: str, reply_to_message_id: int | Non
 
 
 def download_reel(url: str) -> str:
+    log(f"[download] start url={url}")
+    log(f"[download] cookie file path={COOKIE_FILE}")
+    log(f"[download] cookie exists={os.path.exists(COOKIE_FILE)}")
+
     if not os.path.exists(COOKIE_FILE):
         raise FileNotFoundError("cookies.txt не найден рядом с app.py")
 
@@ -122,7 +131,7 @@ def download_reel(url: str) -> str:
         "format": "best",
         "merge_output_format": "mp4",
         "windowsfilenames": True,
-        "quiet": True,
+        "quiet": False,
         "no_warnings": False,
         "retries": 3,
         "fragment_retries": 3,
@@ -146,12 +155,16 @@ def download_reel(url: str) -> str:
         for pattern in ("*.mp4", "*.mkv", "*.webm", "*.mov"):
             candidates.extend(glob.glob(os.path.join(temp_dir, pattern)))
 
+        log(f"[download] found files={candidates}")
+
         if not candidates:
             raise RuntimeError("Файл после скачивания не найден")
 
         candidates.sort(key=os.path.getmtime, reverse=True)
         return candidates[0]
     except Exception:
+        log("[download] exception:")
+        log(traceback.format_exc())
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
@@ -161,20 +174,39 @@ def health():
     return jsonify({"ok": True, "service": "ig-reel-bot"})
 
 
+@app.get("/debug")
+def debug():
+    return jsonify({
+        "ok": True,
+        "bot_token_set": bool(BOT_TOKEN),
+        "cookie_file_path": COOKIE_FILE,
+        "cookie_exists": os.path.exists(COOKIE_FILE),
+        "cwd": os.getcwd(),
+        "script_dir": SCRIPT_DIR,
+        "files_in_script_dir": sorted(os.listdir(SCRIPT_DIR)),
+    })
+
+
 @app.post("/webhook")
 def webhook():
     try:
         update = request.get_json(force=True, silent=True) or {}
+        log(f"[webhook] update={update}")
+
         message = update.get("message") or {}
         text = (message.get("text") or "").strip()
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
 
+        log(f"[webhook] chat_id={chat_id} message_id={message_id} text={text!r}")
+
         if not chat_id:
             return jsonify({"ok": True, "skip": "no chat_id"})
 
         reel_url = find_instagram_reel_url(text)
+        log(f"[webhook] reel_url={reel_url}")
+
         if not reel_url:
             send_message(chat_id, "Кинь ссылку на Instagram reel.", reply_to_message_id=message_id)
             return jsonify({"ok": True, "skip": "no reel url"})
@@ -190,6 +222,9 @@ def webhook():
 
         return jsonify({"ok": True})
     except Exception as e:
+        log("[webhook] exception:")
+        log(traceback.format_exc())
+
         try:
             update = request.get_json(force=True, silent=True) or {}
             message = update.get("message") or {}
@@ -199,7 +234,8 @@ def webhook():
             if chat_id:
                 send_message(chat_id, f"Ошибка: {e}", reply_to_message_id=message_id)
         except Exception:
-            pass
+            log("[webhook] failed to send error message to telegram")
+            log(traceback.format_exc())
 
         return jsonify({"ok": False, "error": str(e)}), 500
 
