@@ -111,29 +111,35 @@ def send_message(chat_id: int, text: str, reply_to_message_id=None):
     return telegram("sendMessage", payload=payload)
 
 
-def send_video_file(chat_id: int, file_path: str, reply_to_message_id=None):
+def send_video_file(chat_id: int, file_path: str, caption=None):
     payload = {
         "chat_id": str(chat_id),
         "supports_streaming": "true",
     }
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = str(reply_to_message_id)
+    if caption:
+        payload["caption"] = caption
+        payload["parse_mode"] = "HTML"
 
     with open(file_path, "rb") as f:
         files = {"video": (os.path.basename(file_path), f, "video/mp4")}
         return telegram("sendVideo", payload=payload, files=files)
 
 
-def send_document_file(chat_id: int, file_path: str, reply_to_message_id=None):
+def send_document_file(chat_id: int, file_path: str, caption=None):
     payload = {
         "chat_id": str(chat_id),
     }
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = str(reply_to_message_id)
+    if caption:
+        payload["caption"] = caption
+        payload["parse_mode"] = "HTML"
 
     with open(file_path, "rb") as f:
         files = {"document": (os.path.basename(file_path), f, "application/octet-stream")}
         return telegram("sendDocument", payload=payload, files=files)
+
+
+def build_result_caption():
+    return '<a href="https://t.me/zalivreel">Nice_ig - автоматизация инстаграма</a>'
 
 
 def build_ydl_opts(temp_dir: str, use_cookies: bool):
@@ -280,18 +286,16 @@ def webhook():
         log(f"[webhook] media_url={media_url}")
 
         if not media_url:
-            send_message(chat_id, "Кинь ссылку на Instagram post/reel.", reply_to_message_id=message_id)
             return jsonify({"ok": True, "skip": "no instagram url"})
 
-        send_message(chat_id, "Скачиваю...", reply_to_message_id=message_id)
-
         file_path = download_instagram_media(media_url)
+        result_caption = build_result_caption()
         try:
             ext = os.path.splitext(file_path)[1].lower()
             if ext in (".mp4", ".mkv", ".webm", ".mov"):
-                send_video_file(chat_id, file_path, reply_to_message_id=message_id)
+                send_video_file(chat_id, file_path, caption=result_caption)
             else:
-                send_document_file(chat_id, file_path, reply_to_message_id=message_id)
+                send_document_file(chat_id, file_path, caption=result_caption)
         finally:
             temp_dir = os.path.dirname(file_path)
             shutil.rmtree(temp_dir, ignore_errors=True)
