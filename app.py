@@ -12,6 +12,8 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+APP_VERSION = "2026-04-02-patch2"
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
@@ -52,7 +54,7 @@ def is_supported_instagram_url(url: str) -> bool:
         if "instagram.com" not in host:
             return False
 
-        return any(part in path for part in ("/reel/", "/p/", "/tv/"))
+        return any(part in path for part in ("/reel/", "/reels/", "/p/", "/tv/"))
     except Exception:
         return False
 
@@ -66,7 +68,7 @@ def find_instagram_media_url(text: str):
         return None
 
     m = re.search(
-        r"https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+/?[^\s]*",
+        r"(?:https?://)?(?:www\.)?instagram\.com/(?:reel|reels|p|tv)/[A-Za-z0-9_-]+/?[^\s]*",
         text,
         re.I,
     )
@@ -235,17 +237,19 @@ def download_instagram_media(url: str) -> str:
 
 
 @app.get("/")
-
-
-@app.get("/")
 def health():
-    return jsonify({"ok": True, "service": "ig-reel-bot"})
+    return jsonify({
+        "ok": True,
+        "service": "ig-reel-bot",
+        "version": APP_VERSION,
+    })
 
 
 @app.get("/debug")
 def debug():
     return jsonify({
         "ok": True,
+        "version": APP_VERSION,
         "bot_token_set": bool(BOT_TOKEN),
         "cookie_file_path": COOKIE_FILE,
         "cookie_exists": os.path.exists(COOKIE_FILE),
@@ -262,7 +266,7 @@ def webhook():
         log(f"[webhook] update={update}")
 
         message = update.get("message") or {}
-        text = (message.get("text") or "").strip()
+        text = (message.get("text") or message.get("caption") or "").strip()
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
